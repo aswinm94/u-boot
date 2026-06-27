@@ -2,6 +2,7 @@
 # to the uefi partition of QCS9100 based dev boards with
 # the "Linux Embedded" partition layout (which have
 # a dedicated "uefi" partition for edk2/U-Boot)
+#test
 
 #include "qcom_defconfig"
 
