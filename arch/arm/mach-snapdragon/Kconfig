@@ -42,6 +42,14 @@ config SYS_CONFIG_NAME
 	  Based on this option include/configs/<CONFIG_SYS_CONFIG_NAME>.h header
 	  will be used for board configuration.
 
+config QCOM_HWDETECT
+	bool "Qualcomm Hardware Detection"
+	depends on QCOM_SMEM
+	select QCOM_HWINFO
+	help
+	  Hardware parameter detection from SMEM and TCSR for
+	  DTB selection and other platform subsystems.
+
 choice
 	prompt "Qualcomm boot0.h workaround"
 	optional
