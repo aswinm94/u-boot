@@ -24,14 +24,19 @@
 
 DECLARE_GLOBAL_DATA_PTR;
 
-static struct mm_region rbx_mem_map[CONFIG_NR_DRAM_BANKS + 2] = { { 0 } };
+/*
+ * +2 for the peripheral block entry and the terminator, and another
+ * +CONFIG_NR_DRAM_BANKS so each inter-bank gap can get its own entry
+ * (see build_mem_map()).
+ */
+static struct mm_region rbx_mem_map[2 * CONFIG_NR_DRAM_BANKS + 2] = { { 0 } };
 
 struct mm_region *mem_map = rbx_mem_map;
 
 static void build_mem_map(void)
 {
 	int i, j;
-
+	phys_addr_t prev_end;
 	/*
 	 * Ensure the peripheral block is sized to correctly cover the address range
 	 * up to the first memory bank.
@@ -46,12 +51,38 @@ static void build_mem_map(void)
 			 PTE_BLOCK_NON_SHARE |
 			 PTE_BLOCK_PXN | PTE_BLOCK_UXN;
 
-	for (i = 1, j = 0; i < ARRAY_SIZE(rbx_mem_map) - 1 && gd->dram[j].size; i++, j++) {
+	/*
+	 * Emit each DRAM bank, plus a device-memory entry for any gap between
+	 * it and the previous bank. Gaps are firmware-carved regions not
+	 * reported in the SMEM usable-RAM table, so they must not be folded
+	 * into a NORMAL/cacheable bank entry: treating them as MT_DEVICE_NGNRNE
+	 * (matching the pre-DRAM peripheral entry above) stops speculative
+	 * accesses instead of silently reading/caching whatever firmware left
+	 * there.
+	 */
+	i = 1;
+	prev_end = gd->dram[0].start;
+	for (j = 0; i < ARRAY_SIZE(rbx_mem_map) - 1 && gd->dram[j].size; j++) {
+		if (gd->dram[j].start > prev_end) {
+			mem_map[i].phys = prev_end;
+			mem_map[i].virt = mem_map[i].phys;
+			mem_map[i].size = gd->dram[j].start - prev_end;
+			mem_map[i].attrs = PTE_BLOCK_MEMTYPE(MT_DEVICE_NGNRNE) |
+					   PTE_BLOCK_NON_SHARE |
+					   PTE_BLOCK_PXN | PTE_BLOCK_UXN |
+					   PTE_BLOCK_RO;
+			i++;
+			if (i >= ARRAY_SIZE(rbx_mem_map) - 1)
+				break;
+		}
+
 		mem_map[i].phys = gd->dram[j].start;
 		mem_map[i].virt = mem_map[i].phys;
 		mem_map[i].size = gd->dram[j].size;
 		mem_map[i].attrs = PTE_BLOCK_MEMTYPE(MT_NORMAL) | \
 				   PTE_BLOCK_INNER_SHARE;
+		prev_end = gd->dram[j].start + gd->dram[j].size;
+		i++;
 	}
 
 	mem_map[i].phys = UINT64_MAX;
