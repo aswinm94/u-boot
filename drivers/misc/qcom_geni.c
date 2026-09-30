@@ -7,7 +7,6 @@
 #define pr_fmt(fmt) "GENI-SE: " fmt
 
 #include <blk.h>
-#include <clk.h>
 #include <part.h>
 #include <dm/device.h>
 #include <dm/read.h>
@@ -18,7 +17,6 @@
 #include <linux/delay.h>
 #include <linux/io.h>
 #include <linux/ioport.h>
-#include <mmc.h>
 #include <misc.h>
 #include <linux/printk.h>
 #include <soc/qcom/geni-se.h>
@@ -36,7 +34,6 @@ struct qup_se_rsc {
 };
 
 struct geni_se_plat {
-	struct clk_bulk clks;
 	bool need_firmware_load;
 	bool is_mini_core;
 };
@@ -449,30 +446,14 @@ int qcom_geni_load_firmware(phys_addr_t qup_base,
  * We need to determine if firmware loading is necessary. Best way to do that is to check the FW
  * revision of each QUP and see if it has already been loaded.
  */
-static int geni_se_probe(struct udevice *dev)
+static int geni_se_of_to_plat(struct udevice *dev)
 {
 	ofnode child;
 	struct resource res;
 	u32 proto;
-	int ret;
 	struct geni_se_plat *plat = dev_get_plat(dev);
 
-	/* Enable the wrapper clocks before accessing serial-engine registers. */
-	ret = clk_get_bulk(dev, &plat->clks);
-	if (ret) {
-		dev_err(dev, "failed to get wrapper clocks: %d\n", ret);
-		return ret;
-	}
-
-	ret = clk_enable_bulk(&plat->clks);
-	if (ret) {
-		dev_err(dev, "failed to enable wrapper clocks: %d\n", ret);
-		clk_release_bulk(&plat->clks);
-		return ret;
-	}
-
 	plat->need_firmware_load = false;
-	plat->is_mini_core = false;
 
 	dev_for_each_subnode(child, dev) {
 		if (!ofnode_is_enabled(child))
@@ -495,61 +476,30 @@ static int geni_se_probe(struct udevice *dev)
 	return 0;
 }
 
-static int geni_se_remove(struct udevice *dev)
-{
-	struct geni_se_plat *plat = dev_get_plat(dev);
-
-	return clk_release_bulk(&plat->clks);
-}
-
 #define QUPFW_PART_TYPE_GUID "21d1219f-2ed1-4ab4-930a-41a16ae75f7f"
 
-static int find_qupfw_part(struct udevice *blk_dev,
-			   struct disk_partition *part_info)
+static int find_qupfw_part(struct udevice **blk_dev, struct disk_partition *part_info)
 {
 	struct blk_desc *desc;
 	int ret, partnum;
 
-	desc = dev_get_uclass_plat(blk_dev);
-	if (!desc)
-		return -ENODEV;
+	uclass_foreach_dev_probe(UCLASS_BLK, *blk_dev) {
+		if (device_get_uclass_id(*blk_dev) != UCLASS_BLK)
+			continue;
 
-	part_init(desc);
-	if (desc->part_type == PART_TYPE_UNKNOWN)
-		return -ENOENT;
-
-	for (partnum = 1;; partnum++) {
-		ret = part_get_info(desc, partnum, part_info);
-		if (ret)
-			break;
-		if (!strcmp(part_info->type_guid, QUPFW_PART_TYPE_GUID))
-			return 0;
+		desc = dev_get_uclass_plat(*blk_dev);
+		if (!desc || desc->part_type == PART_TYPE_UNKNOWN)
+			continue;
+		for (partnum = 1;; partnum++) {
+			ret = part_get_info(desc, partnum, part_info);
+			if (ret)
+				break;
+			if (!strcmp(part_info->type_guid, QUPFW_PART_TYPE_GUID))
+				return 0;
+		}
 	}
 
 	return -ENOENT;
-}
-
-static int get_qupfw_blkdev(struct udevice *geni_wrapper,
-			    struct udevice **blk_dev)
-{
-	struct udevice *mmc_dev;
-	struct mmc *mmc;
-	int ret;
-
-	ret = uclass_get_device_by_phandle(UCLASS_MMC, geni_wrapper,
-					   "u-boot,qupfw-storage", &mmc_dev);
-	if (ret)
-		return ret;
-
-	mmc = mmc_get_mmc_dev(mmc_dev);
-	if (!mmc)
-		return -ENODEV;
-
-	ret = mmc_init(mmc);
-	if (ret)
-		return ret;
-
-	return blk_get_from_parent(mmc_dev, blk_dev);
 }
 
 static int probe_children_load_firmware(struct udevice *dev)
@@ -608,7 +558,6 @@ static int qcom_geni_fw_initialise(void)
 	void *fw_buf;
 	size_t fw_size = MAX_FW_BUF_SIZE;
 	struct geni_se_plat *plat;
-	bool is_mini_core;
 
 	/* Find the first GENI SE wrapper that needs fw loading */
 	for (uclass_first_device(UCLASS_MISC, &geni_wrapper);
@@ -626,19 +575,12 @@ static int qcom_geni_fw_initialise(void)
 		return 0;
 	}
 
-	is_mini_core = plat->is_mini_core;
-	if (is_mini_core) {
+	if (plat->is_mini_core) {
 		fw_buf = qup_mini_cores;
 		goto mini_core;
 	}
 
-	ret = get_qupfw_blkdev(geni_wrapper, &blk_dev);
-	if (ret) {
-		pr_err("QUP firmware storage device not found: %d\n", ret);
-		return 0;
-	}
-
-	ret = find_qupfw_part(blk_dev, &part_info);
+	ret = find_qupfw_part(&blk_dev, &part_info);
 	if (ret) {
 		pr_err("QUP firmware partition not found\n");
 		return 0;
@@ -681,9 +623,6 @@ mini_core:
 		}
 	}
 
-	if (!is_mini_core)
-		free(fw_buf);
-
 	return 0;
 }
 
@@ -700,8 +639,7 @@ U_BOOT_DRIVER(geni_se_qup) = {
 	.name = "geni-se-qup",
 	.id = UCLASS_MISC,
 	.of_match = geni_ids,
-	.probe = geni_se_probe,
-	.remove = geni_se_remove,
+	.of_to_plat = geni_se_of_to_plat,
 	.plat_auto = sizeof(struct geni_se_plat),
 	.flags = DM_FLAG_DEFAULT_PD_CTRL_OFF,
 };
